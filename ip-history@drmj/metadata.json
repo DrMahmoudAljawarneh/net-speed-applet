@@ -1,0 +1,15 @@
+{
+  "uuid": "ip-history@drmj",
+  "name": "IP Address",
+  "description": "Shows the current public IP address to the left of the clock, keeps a log of public addresses this PC has used and clears the log every day at 03:00.",
+  "shell-version": [
+    "45",
+    "46",
+    "47",
+    "48",
+    "49",
+    "50"
+  ],
+  "url": "https://example.com/net-speed",
+  "version": 2
+}

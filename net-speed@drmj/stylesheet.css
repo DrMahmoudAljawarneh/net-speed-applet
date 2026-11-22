@@ -1,0 +1,112 @@
+/* Panel applet */
+
+.net-speed-box {
+    spacing: 14px;
+}
+
+.net-speed-group {
+    spacing: 12px;
+}
+
+.net-speed-pair {
+    spacing: 4px;
+}
+
+.net-speed-label {
+    /* Tabular numerals keep the panel from wobbling as digits change. */
+    font-feature-settings: "tnum";
+}
+
+.net-speed-arrow {
+    -st-icon-style: symbolic;
+}
+
+.net-speed-arrow-down {
+    color: #2ec27e;
+}
+
+.net-speed-arrow-up {
+    color: #62a0ea;
+}
+
+/* Menu */
+
+.net-speed-menu {
+    min-width: 300px;
+}
+
+.net-speed-row-box {
+    spacing: 8px;
+}
+
+.net-speed-row-title {
+    font-size: 0.95em;
+}
+
+.net-speed-row-value {
+    font-weight: 600;
+    font-feature-settings: "tnum";
+}
+
+.net-speed-detail-box {
+    spacing: 6px;
+}
+
+.net-speed-detail-header {
+    spacing: 12px;
+}
+
+.net-speed-detail-title {
+    font-weight: 700;
+}
+
+.net-speed-detail-value {
+    font-size: 1.1em;
+    font-weight: 700;
+    font-feature-settings: "tnum";
+}
+
+.net-speed-detail-info {
+    font-size: 0.82em;
+    font-feature-settings: "tnum";
+    opacity: 0.78;
+}
+
+.net-speed-detail-caption {
+    font-size: 0.78em;
+    opacity: 0.78;
+}
+
+.net-speed-cores-row {
+    spacing: 10px;
+}
+
+/* Meter accents (CPU blue, memory green, cores lighter blue). */
+.net-speed-meter,
+.net-speed-meter-cpu {
+    -net-speed-accent: #3584e4;
+}
+
+.net-speed-meter-ram {
+    -net-speed-accent: #26a269;
+}
+
+.net-speed-cores {
+    -net-speed-accent: #62a0ea;
+}
+
+.net-speed-iface-name {
+    font-size: 0.85em;
+    font-weight: 600;
+}
+
+.net-speed-iface-value {
+    font-size: 0.85em;
+    font-feature-settings: "tnum";
+    opacity: 0.85;
+}
+
+.net-speed-menu-footer {
+    font-size: 0.8em;
+    opacity: 0.65;
+}

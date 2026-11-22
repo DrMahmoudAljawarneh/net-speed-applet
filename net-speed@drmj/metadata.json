@@ -1,0 +1,15 @@
+{
+  "uuid": "net-speed@drmj",
+  "name": "Net Speed",
+  "description": "Shows live download and upload speed, CPU usage and RAM usage in the top panel, with meters, per-core CPU load, memory/swap details, per-interface rates and session totals.",
+  "shell-version": [
+    "45",
+    "46",
+    "47",
+    "48",
+    "49",
+    "50"
+  ],
+  "url": "https://example.com/net-speed",
+  "version": 1
+}
