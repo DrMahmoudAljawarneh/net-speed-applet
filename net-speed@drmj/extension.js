@@ -87,6 +87,19 @@ function formatKbMbSpeed(bytesPerSecond) {
     return `${formatValue(bytesPerSecond / 1000)} KB/s`;
 }
 
+function formatKbpsMbpsSpeed(bytesPerSecond) {
+    const bitsPerSecond = bytesPerSecond * 8;
+    if (bitsPerSecond >= 999_500)
+        return `${formatValue(bitsPerSecond / 1_000_000)} Mbps`;
+    return `${formatValue(bitsPerSecond / 1000)} Kbps`;
+}
+
+function formatPanelSpeed(bytesPerSecond, speedUnit) {
+    return speedUnit === 'bits'
+        ? formatKbpsMbpsSpeed(bytesPerSecond)
+        : formatKbMbSpeed(bytesPerSecond);
+}
+
 /**
  * Reads a whole /proc file as text.
  *
@@ -418,8 +431,10 @@ class CoreBars extends St.DrawingArea {
 
 const NetSpeedIndicator = GObject.registerClass(
 class NetSpeedIndicator extends PanelMenu.Button {
-    _init(iconDir) {
+    _init(iconDir, settings) {
         super._init(0.5, 'Net Speed');
+        this._settings = settings;
+        this._settingsChangedIds = [];
         this.menu.box.add_style_class_name('net-speed-menu');
 
         this._iconDir = iconDir;
@@ -498,6 +513,18 @@ class NetSpeedIndicator extends PanelMenu.Button {
         box.add_child(this._cpuLabel);
         box.add_child(this._ramLabel);
         this.add_child(box);
+
+        this._applySettings();
+        if (this._settings) {
+            this._settingsChangedIds.push(
+                this._settings.connect('changed::show-cpu', () => this._applySettings()),
+                this._settings.connect('changed::show-ram', () => this._applySettings()),
+                this._settings.connect('changed::speed-unit', () => {
+                    this._fixLabelWidths();
+                    this._refreshLabels();
+                })
+            );
+        }
 
         this._buildMenu();
 
@@ -702,6 +729,10 @@ class NetSpeedIndicator extends PanelMenu.Button {
     }
 
     stop() {
+        for (const id of this._settingsChangedIds)
+            this._settings?.disconnect(id);
+        this._settingsChangedIds = [];
+
         if (!this._timeoutId)
             return;
 
@@ -709,14 +740,24 @@ class NetSpeedIndicator extends PanelMenu.Button {
         this._timeoutId = 0;
     }
 
+    _applySettings() {
+        if (!this._settings)
+            return;
+        this._cpuLabel.visible = this._settings.get_boolean('show-cpu');
+        this._ramLabel.visible = this._settings.get_boolean('show-ram');
+    }
+
     /**
      * Reserves the width of the widest possible value for every metric, so
      * changing numbers never reflow the panel.
      */
     _fixLabelWidths() {
+        const speedProbe = this._settings?.get_string('speed-unit') === 'bits'
+            ? '9999 Mbps'
+            : '9999 MB/s';
         const probes = [
-            [this._downLabel, '9999 MB/s'],
-            [this._upLabel, '9999 MB/s'],
+            [this._downLabel, speedProbe],
+            [this._upLabel, speedProbe],
             [this._cpuLabel, 'CPU 100%'],
             [this._ramLabel, 'RAM 100%'],
         ];
@@ -887,8 +928,9 @@ class NetSpeedIndicator extends PanelMenu.Button {
     }
 
     _refreshLabels() {
-        const down = formatKbMbSpeed(this._rxRate);
-        const up = formatKbMbSpeed(this._txRate);
+        const speedUnit = this._settings?.get_string('speed-unit') ?? 'bytes';
+        const down = formatPanelSpeed(this._rxRate, speedUnit);
+        const up = formatPanelSpeed(this._txRate, speedUnit);
         const cpu = Math.round(this._cpuUsage);
         const memory = this._memTotal > 0
             ? Math.round(100 * this._memUsed / this._memTotal)
@@ -950,7 +992,7 @@ export default class NetSpeedExtension extends Extension {
         const iconDir = typeof this.dir === 'string'
             ? this.dir
             : this.dir.get_path();
-        this._indicator = new NetSpeedIndicator(iconDir);
+        this._indicator = new NetSpeedIndicator(iconDir, this.getSettings());
         // Center group, immediately right of the clock.
         Main.panel.addToStatusArea(this.uuid, this._indicator, 1, 'center');
         this._keepRightOfClock();

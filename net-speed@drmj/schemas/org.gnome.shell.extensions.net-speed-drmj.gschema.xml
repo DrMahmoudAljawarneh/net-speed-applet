@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.net-speed-drmj" path="/org/gnome/shell/extensions/net-speed-drmj/">
+    <key name="show-cpu" type="b">
+      <default>true</default>
+      <summary>Show CPU usage in panel</summary>
+      <description>Whether to display the CPU percentage in the top panel.</description>
+    </key>
+    <key name="show-ram" type="b">
+      <default>true</default>
+      <summary>Show RAM usage in panel</summary>
+      <description>Whether to display the RAM percentage in the top panel.</description>
+    </key>
+    <key name="speed-unit" type="s">
+      <choices>
+        <choice value="bytes"/>
+        <choice value="bits"/>
+      </choices>
+      <default>'bytes'</default>
+      <summary>Panel speed unit</summary>
+      <description>Unit used for network throughput in the top panel: bytes (KB/s, MB/s) or bits (Kbps, Mbps).</description>
+    </key>
+  </schema>
+</schemalist>

@@ -53,6 +53,13 @@ for uuid in "${UUIDS[@]}"; do
 
     mkdir -p "$dest"
     cp -f "$src/metadata.json" "$src/extension.js" "$src/stylesheet.css" "$dest"/
+    [[ -f "$src/prefs.js" ]] && cp -f "$src/prefs.js" "$dest"/
+
+    if [[ -d "$src/schemas" ]]; then
+        mkdir -p "$dest/schemas"
+        cp -f "$src/schemas"/*.gschema.xml "$dest/schemas"/
+        glib-compile-schemas "$dest/schemas"
+    fi
 
     # Optional bundled icons.
     for icon in "$src"/*-symbolic.svg; do

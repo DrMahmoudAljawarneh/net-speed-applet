@@ -149,6 +149,8 @@ class IpIndicator extends PanelMenu.Button {
         this._lastSave = 0;
         this._dirty = false;
         this._fetchInFlight = false;
+        this._geoInfo = null;
+        this._geoIp = null;
         this._stopped = false;
 
         this._publicIp = null;
@@ -410,6 +412,8 @@ class IpIndicator extends PanelMenu.Button {
     stop() {
         this._stopped = true;
         this._fetchInFlight = false;
+        this._geoInfo = null;
+        this._geoIp = null;
 
         if (this._networkMonitorId) {
             Gio.NetworkMonitor.get_default()
@@ -456,6 +460,8 @@ class IpIndicator extends PanelMenu.Button {
 
         if (index >= PUBLIC_IP_ENDPOINTS.length) {
             this._fetchInFlight = false;
+        this._geoInfo = null;
+        this._geoIp = null;
             this._onFetchFailed();
             return;
         }
@@ -519,6 +525,8 @@ class IpIndicator extends PanelMenu.Button {
             return;
 
         this._fetchInFlight = false;
+        this._geoInfo = null;
+        this._geoIp = null;
         this._online = true;
         this._lastChecked = Math.floor(Date.now() / 1000);
         this._publicIp = address;
@@ -528,6 +536,54 @@ class IpIndicator extends PanelMenu.Button {
         this._refreshLabels();
         this._refreshHistory();
         this._scheduleCheck(CHECK_INTERVAL_SECONDS);
+
+        if (this._geoIp !== address)
+            this._fetchGeoInfo(address);
+    }
+
+    _fetchGeoInfo(address) {
+        if (this._stopped)
+            return;
+
+        const argv = [
+            'curl', '--silent', '--show-error', '--fail', '--location',
+            '--max-time', `${REQUEST_TIMEOUT_SECONDS}`,
+            '--user-agent', 'ip-history@drmj',
+            `https://ipinfo.io/${encodeURIComponent(address)}/json`,
+        ];
+
+        let proc;
+        try {
+            proc = Gio.Subprocess.new(argv,
+                Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_SILENCE);
+        } catch (e) {
+            return;
+        }
+
+        proc.communicate_utf8_async(null, null, (subprocess, result) => {
+            if (this._stopped || this._publicIp !== address)
+                return;
+
+            try {
+                const [, stdout] = subprocess.communicate_utf8_finish(result);
+                if (!subprocess.get_successful() || !stdout)
+                    return;
+
+                const data = JSON.parse(stdout);
+                const org = typeof data.org === 'string'
+                    ? data.org.replace(/^AS\d+\s+/, '').trim()
+                    : '';
+                const parts = [data.country, data.city, org]
+                    .filter(part => typeof part === 'string' && part.trim().length > 0);
+                if (parts.length > 0) {
+                    this._geoInfo = parts.join(' · ');
+                    this._geoIp = address;
+                    this._refreshLabels();
+                }
+            } catch (e) {
+                // Geo metadata is optional; ignore parse/network errors.
+            }
+        });
     }
 
     /**
@@ -582,10 +638,13 @@ class IpIndicator extends PanelMenu.Button {
 
         if (online) {
             this._currentValue.text = address;
-            let info = this._lastChecked
-                ? `Public IP · checked ${formatClock(this._lastChecked)}`
+            const geo = this._geoIp === address && this._geoInfo
+                ? `${this._geoInfo} · `
+                : '';
+            const checked = this._lastChecked
+                ? `checked ${formatClock(this._lastChecked)}`
                 : 'Public IP';
-            this._currentInfo.text = info;
+            this._currentInfo.text = `${geo}${checked}`;
         } else {
             this._currentValue.text = checking ? 'Checking…' : 'No internet';
             this._currentInfo.text = checking

@@ -10,6 +10,7 @@
     "49",
     "50"
   ],
+  "settings-schema": "org.gnome.shell.extensions.net-speed-drmj",
   "url": "https://example.com/net-speed",
   "version": 1
 }
