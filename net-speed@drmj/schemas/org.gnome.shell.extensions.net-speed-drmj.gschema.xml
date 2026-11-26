@@ -20,5 +20,26 @@
       <summary>Panel speed unit</summary>
       <description>Unit used for network throughput in the top panel: bytes (KB/s, MB/s) or bits (Kbps, Mbps).</description>
     </key>
+    <key name="refresh-interval" type="i">
+      <range min="500" max="5000"/>
+      <default>1000</default>
+      <summary>Sampling interval in milliseconds</summary>
+      <description>How often network, CPU, and memory counters are sampled.</description>
+    </key>
+    <key name="show-graph" type="b">
+      <default>true</default>
+      <summary>Show throughput sparkline in menu</summary>
+      <description>Whether to show the 60-sample download/upload graph in the popup menu.</description>
+    </key>
+    <key name="color-thresholds" type="b">
+      <default>true</default>
+      <summary>Highlight high CPU/RAM usage</summary>
+      <description>Color CPU and RAM labels amber at 80% or higher and red at 95% or higher.</description>
+    </key>
+    <key name="ignored-interfaces" type="s">
+      <default>''</default>
+      <summary>Ignored network interfaces</summary>
+      <description>Comma-separated interface names or wildcard patterns (e.g. docker0, veth*) to exclude from totals.</description>
+    </key>
   </schema>
 </schemalist>

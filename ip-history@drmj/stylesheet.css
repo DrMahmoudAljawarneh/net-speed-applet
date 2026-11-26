@@ -1,8 +1,21 @@
 /* Panel label */
 
+.ip-box {
+    spacing: 6px;
+}
+
+.ip-vpn-icon {
+    -st-icon-style: symbolic;
+    color: #2ec27e;
+}
+
 .ip-panel-label {
     /* Tabular numerals keep the panel from wobbling as digits change. */
     font-feature-settings: "tnum";
+}
+
+.ip-panel-stale {
+    opacity: 0.6;
 }
 
 /* Menu */
@@ -36,6 +49,10 @@
     font-size: 0.8em;
     font-weight: 700;
     opacity: 0.85;
+}
+
+.ip-history-scroll {
+    max-height: 240px;
 }
 
 .ip-address-row,

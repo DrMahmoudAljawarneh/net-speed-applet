@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.ip-history-drmj" path="/org/gnome/shell/extensions/ip-history-drmj/">
+    <key name="check-interval" type="i">
+      <range min="60" max="3600"/>
+      <default>300</default>
+      <summary>Public IP check interval in seconds</summary>
+      <description>How often to check the current public IP address.</description>
+    </key>
+    <key name="reset-hour" type="i">
+      <range min="0" max="23"/>
+      <default>3</default>
+      <summary>Daily log reset hour (local time)</summary>
+      <description>Hour of the day (0-23) when the daily IP log is cleared.</description>
+    </key>
+    <key name="enable-geo" type="b">
+      <default>true</default>
+      <summary>Look up country, city and ISP</summary>
+      <description>Query ipinfo.io once per IP change to display location and ISP details.</description>
+    </key>
+    <key name="show-flag" type="b">
+      <default>true</default>
+      <summary>Show country flag in panel</summary>
+      <description>Display the country flag emoji next to the IP address when geolocation is available.</description>
+    </key>
+    <key name="notify-on-change" type="b">
+      <default>true</default>
+      <summary>Notify when public IP changes</summary>
+      <description>Show a desktop notification whenever your public IP address changes.</description>
+    </key>
+    <key name="mask-ip" type="b">
+      <default>false</default>
+      <summary>Mask IP address in panel</summary>
+      <description>Hide most digits of the public IP in the top panel for screen sharing.</description>
+    </key>
+    <key name="show-vpn-icon" type="b">
+      <default>true</default>
+      <summary>Show VPN indicator icon</summary>
+      <description>Display a lock icon when an active VPN interface (tun, wg, tailscale, etc.) is detected.</description>
+    </key>
+  </schema>
+</schemalist>

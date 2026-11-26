@@ -5,8 +5,8 @@
  *
  * Everything comes from /proc, so no extra daemon or permissions are needed:
  *   /proc/net/dev   network byte counters (all interfaces except loopback)
- *   /proc/stat      aggregate CPU time
- *   /proc/meminfo   MemTotal / MemAvailable
+ *   /proc/stat      aggregate CPU time and per-core counters
+ *   /proc/meminfo   MemTotal / MemAvailable / Swap
  *   /proc/loadavg   load averages, shown in the menu only
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -17,88 +17,41 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import St from 'gi://St';
 import Clutter from 'gi://Clutter';
+import Shell from 'gi://Shell';
 
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
-const REFRESH_INTERVAL_MS = 1000;
+import {
+    BYTE_UNITS,
+    formatMagnitude,
+    formatSpeed,
+    formatBitrate,
+    formatPanelSpeed,
+    parseIgnoredPatterns,
+    isInterfaceIgnored,
+    formatIntervalFooter,
+    thresholdClass,
+} from './utils.js';
+
+const DEFAULT_REFRESH_INTERVAL_MS = 1000;
 // Samples further apart than this (resume from suspend, heavy stall) are
 // treated as a fresh baseline instead of producing a bogus giant rate.
-const MAX_SAMPLE_GAP_SECONDS = 5;
+const MAX_SAMPLE_GAP_SECONDS = 10;
+const GRAPH_HISTORY_LEN = 60;
 
 const PROC_NET_DEV_FILE = Gio.File.new_for_path('/proc/net/dev');
 const PROC_STAT_FILE = Gio.File.new_for_path('/proc/stat');
 const PROC_MEMINFO_FILE = Gio.File.new_for_path('/proc/meminfo');
 const PROC_LOADAVG_FILE = Gio.File.new_for_path('/proc/loadavg');
 
-const BYTE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB'];
-const BIT_UNITS = ['bit', 'Kbit', 'Mbit', 'Gbit', 'Tbit'];
+const TEXT_DECODER = new TextDecoder();
 
 // Only log a failing /proc file once, otherwise a persistent problem would
-// flood the journal twice a second.
+// flood the journal every second.
 const loggedReadFailures = new Set();
-
-/**
- * Formats a byte count (or rate) with a sensible number of decimals.
- *
- * @param {number} value value in bytes
- * @param {string[]} units unit names, starting at bytes
- * @returns {string} e.g. "12.34 MB" or "0 B"
- */
-function formatMagnitude(value, units) {
-    if (value < 1)
-        return `0 ${units[0]}`;
-
-    let scaled = value;
-    let index = 0;
-    // 999.5 rather than 1000 so rounding below cannot print "1000 KB".
-    while (scaled >= 999.5 && index < units.length - 1) {
-        scaled /= 1000;
-        index++;
-    }
-
-    const decimals = scaled >= 100 ? 0 : scaled >= 10 ? 1 : 2;
-    return `${scaled.toFixed(decimals)} ${units[index]}`;
-}
-
-function formatSpeed(bytesPerSecond) {
-    return `${formatMagnitude(bytesPerSecond, BYTE_UNITS)}/s`;
-}
-
-function formatBitrate(bytesPerSecond) {
-    return `${formatMagnitude(bytesPerSecond * 8, BIT_UNITS)}/s`;
-}
-
-function formatValue(value) {
-    const decimals = value >= 100 ? 0 : value >= 10 ? 1 : 2;
-    return value.toFixed(decimals);
-}
-
-/**
- * Panel rates stay in KB/s and MB/s (never B/s or GB/s), which keeps the
- * readout compact and predictable.
- */
-function formatKbMbSpeed(bytesPerSecond) {
-    // 999.5 KB rounds to 1000, so switch to MB before that.
-    if (bytesPerSecond >= 999_500)
-        return `${formatValue(bytesPerSecond / 1_000_000)} MB/s`;
-    return `${formatValue(bytesPerSecond / 1000)} KB/s`;
-}
-
-function formatKbpsMbpsSpeed(bytesPerSecond) {
-    const bitsPerSecond = bytesPerSecond * 8;
-    if (bitsPerSecond >= 999_500)
-        return `${formatValue(bitsPerSecond / 1_000_000)} Mbps`;
-    return `${formatValue(bitsPerSecond / 1000)} Kbps`;
-}
-
-function formatPanelSpeed(bytesPerSecond, speedUnit) {
-    return speedUnit === 'bits'
-        ? formatKbpsMbpsSpeed(bytesPerSecond)
-        : formatKbMbSpeed(bytesPerSecond);
-}
 
 /**
  * Reads a whole /proc file as text.
@@ -111,7 +64,7 @@ function readTextFile(file) {
         const [ok, contents] = file.load_contents(null);
         if (!ok)
             return null;
-        return new TextDecoder().decode(contents);
+        return TEXT_DECODER.decode(contents);
     } catch (e) {
         const path = file.get_path() ?? 'file';
         if (!loggedReadFailures.has(path)) {
@@ -285,13 +238,6 @@ function makeArrowIcon(iconDir, direction, size) {
 
 /**
  * Appends a rounded rectangle to the current cairo path.
- *
- * @param {Cairo.Context} cr cairo context
- * @param {number} x left
- * @param {number} y top
- * @param {number} width width
- * @param {number} height height
- * @param {number} radius corner radius
  */
 function roundedRectangle(cr, x, y, width, height, radius) {
     const r = Math.min(radius, width / 2, height / 2);
@@ -429,16 +375,124 @@ class CoreBars extends St.DrawingArea {
     }
 });
 
+/**
+ * 60-sample sparkline graph showing live download and upload throughput.
+ */
+const SpeedGraph = GObject.registerClass(
+class SpeedGraph extends St.DrawingArea {
+    _init() {
+        this._samples = [];
+        this._downColor = null;
+        this._upColor = null;
+
+        super._init({
+            style_class: 'net-speed-graph',
+            height: 44,
+            x_expand: true,
+        });
+    }
+
+    set samples(values) {
+        this._samples = Array.isArray(values) ? values : [];
+        this.queue_repaint();
+    }
+
+    vfunc_style_changed() {
+        const node = this.get_theme_node();
+        this._downColor = node.get_color('-net-speed-down');
+        this._upColor = node.get_color('-net-speed-up');
+        super.vfunc_style_changed();
+    }
+
+    _drawSeries(cr, width, height, values, maxRate, color) {
+        const count = values.length;
+        if (count < 2)
+            return;
+
+        const padY = 3;
+        const plotH = Math.max(1, height - padY * 2);
+        const stepX = width / (GRAPH_HISTORY_LEN - 1);
+        const startX = width - (count - 1) * stepX;
+
+        const yFor = val => padY + plotH * (1 - Math.min(1, Math.max(0, val / maxRate)));
+
+        // Area fill
+        cr.moveTo(startX, height);
+        for (let i = 0; i < count; i++)
+            cr.lineTo(startX + i * stepX, yFor(values[i]));
+        cr.lineTo(startX + (count - 1) * stepX, height);
+        cr.closePath();
+        cr.setSourceRGBA(color.red / 255, color.green / 255, color.blue / 255, 0.22);
+        cr.fill();
+
+        // Stroke line
+        cr.moveTo(startX, yFor(values[0]));
+        for (let i = 1; i < count; i++)
+            cr.lineTo(startX + i * stepX, yFor(values[i]));
+        cr.setSourceRGBA(color.red / 255, color.green / 255, color.blue / 255, 0.95);
+        cr.setLineWidth(1.5);
+        cr.stroke();
+    }
+
+    vfunc_repaint() {
+        const cr = this.get_context();
+        const [width, height] = this.get_surface_size();
+        const foreground = this.get_theme_node().get_foreground_color();
+
+        cr.save();
+        roundedRectangle(cr, 0, 0, width, height, 4);
+        cr.clip();
+
+        // Subtle background
+        cr.setSourceRGBA(foreground.red / 255, foreground.green / 255,
+            foreground.blue / 255, 0.08);
+        cr.paint();
+
+        // Horizontal reference lines (33% and 66%)
+        cr.setSourceRGBA(foreground.red / 255, foreground.green / 255,
+            foreground.blue / 255, 0.10);
+        cr.setLineWidth(1);
+        for (const frac of [0.33, 0.66]) {
+            const y = Math.round(height * frac) + 0.5;
+            cr.moveTo(0, y);
+            cr.lineTo(width, y);
+            cr.stroke();
+        }
+
+        const samples = this._samples;
+        if (samples.length >= 2) {
+            let maxRate = 10_000; // 10 KB/s floor so idle noise stays flat
+            for (const s of samples) {
+                if (s.rx > maxRate)
+                    maxRate = s.rx;
+                if (s.tx > maxRate)
+                    maxRate = s.tx;
+            }
+
+            const downColor = this._downColor ?? foreground;
+            const upColor = this._upColor ?? foreground;
+
+            this._drawSeries(cr, width, height, samples.map(s => s.rx), maxRate, downColor);
+            this._drawSeries(cr, width, height, samples.map(s => s.tx), maxRate, upColor);
+        }
+
+        cr.restore();
+        cr.$dispose();
+    }
+});
+
 const NetSpeedIndicator = GObject.registerClass(
 class NetSpeedIndicator extends PanelMenu.Button {
-    _init(iconDir, settings) {
+    _init(iconDir, settings, openPreferences) {
         super._init(0.5, 'Net Speed');
         this._settings = settings;
+        this._openPreferences = openPreferences;
         this._settingsChangedIds = [];
         this.menu.box.add_style_class_name('net-speed-menu');
 
         this._iconDir = iconDir;
         this._timeoutId = 0;
+        this._paused = false;
         this._previousCounters = null;
         this._previousCpu = null;
         this._previousSampleTime = 0;
@@ -448,6 +502,9 @@ class NetSpeedIndicator extends PanelMenu.Button {
         this._txRate = 0;
         this._sessionRx = 0;
         this._sessionTx = 0;
+        this._history = [];
+        this._selectedInterface = null;
+        this._ignoredPatterns = [];
 
         this._cpuUsage = 0;
         this._coreUsage = [];
@@ -514,19 +571,17 @@ class NetSpeedIndicator extends PanelMenu.Button {
         box.add_child(this._ramLabel);
         this.add_child(box);
 
-        this._applySettings();
-        if (this._settings) {
-            this._settingsChangedIds.push(
-                this._settings.connect('changed::show-cpu', () => this._applySettings()),
-                this._settings.connect('changed::show-ram', () => this._applySettings()),
-                this._settings.connect('changed::speed-unit', () => {
-                    this._fixLabelWidths();
-                    this._refreshLabels();
-                })
-            );
-        }
+        // Middle-click opens System Monitor.
+        this.connect('button-press-event', (_actor, event) => {
+            if (event.get_button() === Clutter.BUTTON_MIDDLE) {
+                this._openSystemMonitor();
+                return Clutter.EVENT_STOP;
+            }
+            return Clutter.EVENT_PROPAGATE;
+        });
 
         this._buildMenu();
+        this._applySettings();
 
         this.menu.connect('open-state-changed', (_menu, isOpen) => {
             if (!isOpen)
@@ -538,12 +593,78 @@ class NetSpeedIndicator extends PanelMenu.Button {
         });
     }
 
+    _openSystemMonitor() {
+        const appSystem = Shell.AppSystem.get_default();
+        const candidates = [
+            'org.gnome.SystemMonitor.desktop',
+            'gnome-system-monitor.desktop',
+            'io.missioncenter.MissionCenter.desktop',
+        ];
+        for (const id of candidates) {
+            const app = appSystem.lookup_app(id);
+            if (app) {
+                app.activate();
+                return;
+            }
+        }
+        try {
+            Gio.Subprocess.new(['gnome-system-monitor'], Gio.SubprocessFlags.NONE);
+        } catch (e) {
+            log(`net-speed: could not launch system monitor: ${e.message}`);
+        }
+    }
+
+    _copyText(text) {
+        if (!text)
+            return;
+        St.Clipboard.get_default().set_text(St.ClipboardType.CLIPBOARD, text);
+    }
+
     _buildMenu() {
         this.menu.removeAll();
 
         this._downRow = this._addValueRow('Download', 'down');
         this._upRow = this._addValueRow('Upload', 'up');
         this._sessionRow = this._addValueRow('Session');
+
+        // Throughput sparkline section
+        this._graphItem = new PopupMenu.PopupBaseMenuItem({
+            reactive: false,
+            activate: false,
+            hover: false,
+            can_focus: false,
+            style_class: 'net-speed-detail',
+        });
+        this._graphItem.setOrnament(PopupMenu.Ornament.HIDDEN);
+
+        const graphBox = new St.BoxLayout({
+            vertical: true,
+            x_expand: true,
+            style_class: 'net-speed-graph-box',
+        });
+        const graphHeader = new St.BoxLayout({
+            x_expand: true,
+            style_class: 'net-speed-graph-header',
+        });
+        this._graphTitle = new St.Label({
+            text: 'Throughput',
+            style_class: 'net-speed-detail-caption',
+            x_expand: true,
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        this._graphPeak = new St.Label({
+            text: '',
+            style_class: 'net-speed-graph-peak',
+            x_align: Clutter.ActorAlign.END,
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        graphHeader.add_child(this._graphTitle);
+        graphHeader.add_child(this._graphPeak);
+        this._speedGraph = new SpeedGraph();
+        graphBox.add_child(graphHeader);
+        graphBox.add_child(this._speedGraph);
+        this._graphItem.add_child(graphBox);
+        this.menu.addMenuItem(this._graphItem);
 
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
@@ -576,27 +697,26 @@ class NetSpeedIndicator extends PanelMenu.Button {
         });
         this.menu.addMenuItem(resetItem);
 
-        const footer = new PopupMenu.PopupMenuItem('Sampled every second', {
+        if (this._openPreferences) {
+            const prefsItem = new PopupMenu.PopupMenuItem('Preferences');
+            prefsItem.setOrnament(PopupMenu.Ornament.HIDDEN);
+            prefsItem.connect('activate', () => this._openPreferences());
+            this.menu.addMenuItem(prefsItem);
+        }
+
+        this._footerItem = new PopupMenu.PopupMenuItem('Sampled every second', {
             reactive: false,
         });
-        footer.setOrnament(PopupMenu.Ornament.HIDDEN);
-        footer.label.add_style_class_name('net-speed-menu-footer');
-        this.menu.addMenuItem(footer);
+        this._footerItem.setOrnament(PopupMenu.Ornament.HIDDEN);
+        this._footerItem.label.add_style_class_name('net-speed-menu-footer');
+        this.menu.addMenuItem(this._footerItem);
     }
 
     /**
-     * Adds a "title ... value" row, optionally with a direction arrow.
-     *
-     * @param {string} titleText row title
-     * @param {'down'|'up'|null} direction arrow to show before the title
-     * @returns {{item: PopupMenu.PopupBaseMenuItem, value: St.Label}}
+     * Adds a clickable "title ... value" row that copies its value on click.
      */
     _addValueRow(titleText, direction = null) {
         const item = new PopupMenu.PopupBaseMenuItem({
-            reactive: false,
-            activate: false,
-            hover: false,
-            can_focus: false,
             style_class: 'net-speed-row',
         });
         item.setOrnament(PopupMenu.Ornament.HIDDEN);
@@ -623,6 +743,8 @@ class NetSpeedIndicator extends PanelMenu.Button {
             y_align: Clutter.ActorAlign.CENTER,
         });
 
+        item.connect('activate', () => this._copyText(value.text));
+
         box.add_child(title);
         box.add_child(value);
         item.add_child(box);
@@ -633,10 +755,6 @@ class NetSpeedIndicator extends PanelMenu.Button {
 
     /**
      * Adds a CPU/memory block: title + percentage, a meter and a detail line.
-     *
-     * @param {string} titleText block title
-     * @param {string} meterStyle accent style class for the meter
-     * @returns {object} references used by _refreshLabels()
      */
     _addDetailItem(titleText, meterStyle) {
         const item = new PopupMenu.PopupBaseMenuItem({
@@ -692,8 +810,6 @@ class NetSpeedIndicator extends PanelMenu.Button {
 
     /**
      * Adds the per-core bar strip below the CPU detail line.
-     *
-     * @param {St.BoxLayout} parentBox vertical CPU block
      */
     _addCoreRow(parentBox) {
         const row = new St.BoxLayout({
@@ -713,31 +829,100 @@ class NetSpeedIndicator extends PanelMenu.Button {
         parentBox.add_child(row);
     }
 
-    start() {
-        if (this._timeoutId)
+    _connectSettings() {
+        if (!this._settings || this._settingsChangedIds.length > 0)
             return;
 
-        this._fixLabelWidths();
-        this._sample();
+        this._settingsChangedIds.push(
+            this._settings.connect('changed::show-cpu', () => this._applySettings()),
+            this._settings.connect('changed::show-ram', () => this._applySettings()),
+            this._settings.connect('changed::show-graph', () => this._applySettings()),
+            this._settings.connect('changed::color-thresholds', () => this._refreshLabels()),
+            this._settings.connect('changed::ignored-interfaces', () => {
+                this._applySettings();
+                this._syncInterfaceItems();
+                this._refreshLabels();
+            }),
+            this._settings.connect('changed::speed-unit', () => {
+                this._fixLabelWidths();
+                this._refreshLabels();
+            }),
+            this._settings.connect('changed::refresh-interval', () => {
+                this._applySettings();
+                if (!this._paused && this._timeoutId)
+                    this._restartTimer();
+            })
+        );
+    }
+
+    _disconnectSettings() {
+        for (const id of this._settingsChangedIds)
+            this._settings?.disconnect(id);
+        this._settingsChangedIds = [];
+    }
+
+    _getRefreshInterval() {
+        return this._settings?.get_int('refresh-interval') ?? DEFAULT_REFRESH_INTERVAL_MS;
+    }
+
+    _startTimer() {
+        if (this._timeoutId || this._paused)
+            return;
+
         this._timeoutId = GLib.timeout_add(
             GLib.PRIORITY_DEFAULT,
-            REFRESH_INTERVAL_MS,
+            this._getRefreshInterval(),
             () => {
                 this._sample();
                 return GLib.SOURCE_CONTINUE;
             });
     }
 
-    stop() {
-        for (const id of this._settingsChangedIds)
-            this._settings?.disconnect(id);
-        this._settingsChangedIds = [];
-
+    _stopTimer() {
         if (!this._timeoutId)
             return;
-
         GLib.source_remove(this._timeoutId);
         this._timeoutId = 0;
+    }
+
+    _restartTimer() {
+        this._stopTimer();
+        this._startTimer();
+    }
+
+    setPaused(paused) {
+        if (this._paused === paused)
+            return;
+        this._paused = paused;
+        if (paused) {
+            this._stopTimer();
+        } else {
+            this._previousCounters = null;
+            this._previousCpu = null;
+            this._sample();
+            this._startTimer();
+        }
+    }
+
+    start() {
+        this._connectSettings();
+        this._applySettings();
+        this._fixLabelWidths();
+        if (this._timeoutId || this._paused)
+            return;
+
+        this._sample();
+        this._startTimer();
+    }
+
+    stop() {
+        this._stopTimer();
+        this._disconnectSettings();
+    }
+
+    destroy() {
+        this.stop();
+        super.destroy();
     }
 
     _applySettings() {
@@ -745,6 +930,10 @@ class NetSpeedIndicator extends PanelMenu.Button {
             return;
         this._cpuLabel.visible = this._settings.get_boolean('show-cpu');
         this._ramLabel.visible = this._settings.get_boolean('show-ram');
+        this._graphItem.visible = this._settings.get_boolean('show-graph');
+        this._ignoredPatterns = parseIgnoredPatterns(
+            this._settings.get_string('ignored-interfaces'));
+        this._footerItem.label.text = formatIntervalFooter(this._getRefreshInterval());
     }
 
     /**
@@ -819,6 +1008,9 @@ class NetSpeedIndicator extends PanelMenu.Button {
         let txTotal = 0;
 
         for (const [name, current] of counters) {
+            if (isInterfaceIgnored(name, this._ignoredPatterns))
+                continue;
+
             const previous = this._previousCounters.get(name);
             if (!previous)
                 continue;
@@ -826,11 +1018,8 @@ class NetSpeedIndicator extends PanelMenu.Button {
             const rxDelta = current.rx - previous.rx;
             const txDelta = current.tx - previous.tx;
 
-            if (rxDelta < 0 || txDelta < 0) {
-                // Interface counter reset (e.g. reconnect); wait for a clean
-                // sample instead of showing negative or huge numbers.
+            if (rxDelta < 0 || txDelta < 0)
                 continue;
-            }
 
             const rxRate = rxDelta / elapsed;
             const txRate = txDelta / elapsed;
@@ -843,8 +1032,18 @@ class NetSpeedIndicator extends PanelMenu.Button {
         }
 
         this._rates = rates;
-        this._rxRate = rxTotal;
-        this._txRate = txTotal;
+        if (this._selectedInterface && !rates.has(this._selectedInterface))
+            this._selectedInterface = null;
+
+        const active = this._selectedInterface
+            ? rates.get(this._selectedInterface)
+            : null;
+        this._rxRate = active ? active.rx : rxTotal;
+        this._txRate = active ? active.tx : txTotal;
+
+        this._history.push({rx: this._rxRate, tx: this._txRate});
+        if (this._history.length > GRAPH_HISTORY_LEN)
+            this._history.shift();
     }
 
     _updateCpu(cpu) {
@@ -877,6 +1076,16 @@ class NetSpeedIndicator extends PanelMenu.Button {
         this._txRate = 0;
     }
 
+    _applyThresholdStyle(actor, percent) {
+        actor.remove_style_class_name('net-speed-warn');
+        actor.remove_style_class_name('net-speed-crit');
+        if (this._settings && !this._settings.get_boolean('color-thresholds'))
+            return;
+        const cls = thresholdClass(percent);
+        if (cls)
+            actor.add_style_class_name(cls);
+    }
+
     _syncInterfaceItems() {
         const names = [...this._rates.keys()].sort();
         const existing = [...this._interfaceItems.keys()];
@@ -884,8 +1093,10 @@ class NetSpeedIndicator extends PanelMenu.Button {
         this._interfaceSeparator.visible = names.length > 0;
 
         if (names.length === existing.length &&
-            names.every((name, i) => name === existing[i]))
+            names.every((name, i) => name === existing[i])) {
+            this._updateInterfaceOrnaments();
             return;
+        }
 
         for (const {item} of this._interfaceItems.values())
             item.destroy();
@@ -893,13 +1104,8 @@ class NetSpeedIndicator extends PanelMenu.Button {
 
         for (const name of names) {
             const item = new PopupMenu.PopupBaseMenuItem({
-                reactive: false,
-                activate: false,
-                hover: false,
-                can_focus: false,
                 style_class: 'net-speed-row',
             });
-            item.setOrnament(PopupMenu.Ornament.HIDDEN);
 
             const box = new St.BoxLayout({
                 x_expand: true,
@@ -919,11 +1125,32 @@ class NetSpeedIndicator extends PanelMenu.Button {
                 y_align: Clutter.ActorAlign.CENTER,
             });
 
+            item.connect('activate', () => {
+                this._selectedInterface =
+                    this._selectedInterface === name ? null : name;
+                this._history = [];
+                this._updateInterfaceOrnaments();
+                this._refreshLabels();
+            });
+
             box.add_child(title);
             box.add_child(value);
             item.add_child(box);
             this._interfaceSection.addMenuItem(item);
-            this._interfaceItems.set(name, {item, value});
+            this._interfaceItems.set(name, {item, title, value});
+        }
+
+        this._updateInterfaceOrnaments();
+    }
+
+    _updateInterfaceOrnaments() {
+        for (const [name, {item, title}] of this._interfaceItems) {
+            const pinned = this._selectedInterface === name;
+            item.setOrnament(pinned ? PopupMenu.Ornament.DOT : PopupMenu.Ornament.NONE);
+            if (pinned)
+                title.add_style_class_name('net-speed-iface-active');
+            else
+                title.remove_style_class_name('net-speed-iface-active');
         }
     }
 
@@ -940,6 +1167,8 @@ class NetSpeedIndicator extends PanelMenu.Button {
         this._upLabel.set_text(up);
         this._cpuLabel.set_text(`CPU ${cpu}%`);
         this._ramLabel.set_text(`RAM ${memory}%`);
+        this._applyThresholdStyle(this._cpuLabel, cpu);
+        this._applyThresholdStyle(this._ramLabel, memory);
         this.accessible_name =
             `Download ${down}, upload ${up}, CPU ${cpu}%, memory ${memory}%`;
 
@@ -956,8 +1185,27 @@ class NetSpeedIndicator extends PanelMenu.Button {
             `↓ ${formatMagnitude(this._sessionRx, BYTE_UNITS)}` +
             ` · ↑ ${formatMagnitude(this._sessionTx, BYTE_UNITS)}`;
 
+        if (this._graphItem.visible) {
+            const scope = this._selectedInterface
+                ? `Throughput (${this._selectedInterface})`
+                : 'Throughput';
+            this._graphTitle.text = scope;
+            let peakRx = 0;
+            let peakTx = 0;
+            for (const s of this._history) {
+                if (s.rx > peakRx)
+                    peakRx = s.rx;
+                if (s.tx > peakTx)
+                    peakTx = s.tx;
+            }
+            this._graphPeak.text =
+                `Peak ↓ ${formatSpeed(peakRx)} · ↑ ${formatSpeed(peakTx)}`;
+            this._speedGraph.samples = this._history;
+        }
+
         const load = readLoadAverage();
         this._cpuDetail.value.text = `${cpu}%`;
+        this._applyThresholdStyle(this._cpuDetail.value, cpu);
         this._cpuDetail.meter.fraction = this._cpuUsage / 100;
         this._cpuDetail.info.text =
             `${this._coreCount} ${this._coreCount === 1 ? 'core' : 'cores'}` +
@@ -965,6 +1213,7 @@ class NetSpeedIndicator extends PanelMenu.Button {
         this._coreMeter.cores = this._coreUsage;
 
         this._memDetail.value.text = `${memory}%`;
+        this._applyThresholdStyle(this._memDetail.value, memory);
         this._memDetail.meter.fraction = memory / 100;
         this._memDetail.info.text =
             `${formatMagnitude(this._memUsed, BYTE_UNITS)} of ` +
@@ -992,16 +1241,19 @@ export default class NetSpeedExtension extends Extension {
         const iconDir = typeof this.dir === 'string'
             ? this.dir
             : this.dir.get_path();
-        this._indicator = new NetSpeedIndicator(iconDir, this.getSettings());
+        this._indicator = new NetSpeedIndicator(
+            iconDir,
+            this.getSettings(),
+            () => this.openPreferences());
         // Center group, immediately right of the clock.
         Main.panel.addToStatusArea(this.uuid, this._indicator, 1, 'center');
         this._keepRightOfClock();
         this._indicator.start();
 
-        // On session-mode changes (lock/unlock, user switch) the shell
-        // re-inserts the date menu and can end up to the right of us, so put
-        // ourselves back after it.
+        // On session-mode changes (lock/unlock, user switch) pause polling
+        // while locked and keep ourselves right of the clock.
         this._sessionModeUpdatedId = Main.sessionMode.connect('updated', () => {
+            this._indicator?.setPaused(Main.sessionMode.isLocked);
             this._keepRightOfClock();
         });
     }

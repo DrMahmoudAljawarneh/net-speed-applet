@@ -1,7 +1,7 @@
 {
   "uuid": "ip-history@drmj",
   "name": "IP Address",
-  "description": "Shows the current public IP address to the left of the clock, keeps a log of public addresses this PC has used and clears the log every day at 03:00.",
+  "description": "Shows the current public IP address to the left of the clock, keeps a log of public addresses this PC has used and clears the log daily.",
   "shell-version": [
     "45",
     "46",
@@ -10,6 +10,7 @@
     "49",
     "50"
   ],
+  "settings-schema": "org.gnome.shell.extensions.ip-history-drmj",
   "url": "https://example.com/net-speed",
   "version": 2
 }

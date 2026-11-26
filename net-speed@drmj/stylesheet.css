@@ -17,6 +17,14 @@
     font-feature-settings: "tnum";
 }
 
+.net-speed-warn {
+    color: #f6d32d;
+}
+
+.net-speed-crit {
+    color: #f66151;
+}
+
 .net-speed-arrow {
     -st-icon-style: symbolic;
 }
@@ -46,6 +54,25 @@
 .net-speed-row-value {
     font-weight: 600;
     font-feature-settings: "tnum";
+}
+
+.net-speed-graph-box {
+    spacing: 4px;
+}
+
+.net-speed-graph-header {
+    spacing: 8px;
+}
+
+.net-speed-graph-peak {
+    font-size: 0.78em;
+    font-feature-settings: "tnum";
+    opacity: 0.72;
+}
+
+.net-speed-graph {
+    -net-speed-down: #2ec27e;
+    -net-speed-up: #62a0ea;
 }
 
 .net-speed-detail-box {
@@ -98,6 +125,10 @@
 .net-speed-iface-name {
     font-size: 0.85em;
     font-weight: 600;
+}
+
+.net-speed-iface-active {
+    color: #2ec27e;
 }
 
 .net-speed-iface-value {

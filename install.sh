@@ -53,6 +53,7 @@ for uuid in "${UUIDS[@]}"; do
 
     mkdir -p "$dest"
     cp -f "$src/metadata.json" "$src/extension.js" "$src/stylesheet.css" "$dest"/
+    [[ -f "$src/utils.js" ]] && cp -f "$src/utils.js" "$dest"/
     [[ -f "$src/prefs.js" ]] && cp -f "$src/prefs.js" "$dest"/
 
     if [[ -d "$src/schemas" ]]; then
